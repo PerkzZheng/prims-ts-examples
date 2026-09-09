@@ -1,0 +1,10 @@
+PrimTS examples
+
+Includes an example adapted from FlashInfer:
+Copyright 2025-2026 NVIDIA
+Copyright 2023-2026 FlashInfer community (https://flashinfer.ai/)
+
+The source file retains its original FlashInfer Project copyright notice.
+Modifications for this repository add suggested prefill grouping,
+caller-cached SM counts, and semantic-query-preserving decode views.
+No FlashInfer kernel or bundled third-party component is copied here.
