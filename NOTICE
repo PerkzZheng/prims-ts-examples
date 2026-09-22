@@ -8,3 +8,8 @@ The source file retains its original FlashInfer Project copyright notice.
 Modifications for this repository add suggested prefill grouping,
 caller-cached SM counts, and semantic-query-preserving decode views.
 No FlashInfer kernel or bundled third-party component is copied here.
+
+The GLM sparse MLA example follows vLLM's Apache-2.0 page-stride mapping and
+stable-compaction pattern (Copyright contributors to the vLLM project), and
+FlashInfer's prepared sparse MLA metadata contract. It calls the attention
+kernels from FlashInfer; no attention kernel or model weights are vendored.
