@@ -116,7 +116,7 @@ The commands below use CUDA 13 and the validated CUTLASS DSL version:
 ```bash
 git clone --recursive --branch feat/prims-ts-sparse-mla \
   https://github.com/PerkzZheng/flashinfer.git flashinfer-sparse-mla
-git -C flashinfer-sparse-mla checkout 0d4c02fc28294628bbc75352227226c3e24a7077
+git -C flashinfer-sparse-mla checkout 8ac751ee6a09d8a349a136192dc1ca48d848ac6d
 python -m pip install 'setuptools>=77' 'nvidia-cutlass-dsl[cu13]==4.7.0' triton
 python -m pip install --no-build-isolation -e ./flashinfer-sparse-mla
 
