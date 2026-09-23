@@ -29,7 +29,7 @@ The synthetic BF16 inputs use Hq/Hkv=12/1, D256, 512 selected logical blocks,
 physical K/V pages; production frameworks normally supply distinct mappings.
 Only sparse block size 4 is implemented by this FlashInfer specialization.
 
-## Setup
+## Setup for QToken-KvBlock-Sparse-Attention
 
 Use a CUDA-enabled PyTorch environment and an SM100 or SM103 GPU. The example
 requires the API in [FlashInfer PR #4996](https://github.com/flashinfer-ai/flashinfer/pull/4996),
@@ -71,6 +71,76 @@ Validated on GB300 (SM103) with the pinned FlashInfer source: packed prefill
 with G5/partial groups and G1, and MTP3 decode with G4 and G1. Sampled outputs
 match an FP32 PyTorch reference; decode graph replay overwrites poisoned
 outputs correctly. SM100 runtime has not been tested for this example.
+
+## GLM 5.3 sparse MLA
+
+[glm5_sparse_mla.py](glm5_sparse_mla.py) demonstrates the GLM 5.3 NoPE attention
+backend boundary with one native latent KV pool. **Prefill and decode call the
+same `run_example` function and Prims-TS `plan()` / `run()` operator.** The plan
+selects tile, split and kernel-family settings for the workload; the example
+has no separate dense-prefill implementation or phase-specific attention code.
+
+| Phase | Query shape | Context | Selected tokens |
+| --- | --- | --- | --- |
+| Cached-prefix prefill | `[1, 8192, 64, 512]` | 32768 | 2048 per query |
+| MTP decode | `[4, 4, 64, 512]` | 32768 | 2048 per query |
+
+The default `--topk 2048` matches `index_topk` in the
+[GLM-5.3-Flash config](https://huggingface.co/zai-org/GLM-5.3-Flash/blob/main/config.json).
+Its `index_kpool=4` means 512 pooled selections expand to 2048 token selections.
+This synthetic example generates the token indices directly.
+
+For a serving backend:
+
+- Supply **absorbed** Q with latent dimension 512 and the native BF16/E4M3 latent
+  KV cache. Output is BF16 in latent space; apply the learned value/output
+  projection afterward. `--heads` is the local head count after tensor parallelism.
+- Pass the checkpoint's softmax scale. This NoPE example uses QK dimension 256
+  before absorption, hence `256**-0.5`, even though Q and latent KV have width 512.
+- Supply expanded logical **token** indices from the GLM pooled indexer, including
+  its causal-tail selection. Pooled index IDs cannot be passed as token IDs.
+  Plan `max_topk` for the full list: the incomplete pool tail can add up to three
+  tokens beyond 2048; include any producer-side padding in the list capacity.
+  Indexer pooling does not compress this attention KV cache.
+- Map those tokens through the request's block table. The small Triton preparer
+  compacts holes, accounts for physical page strides, and emits every prepared
+  metadata field needed by automatic dispatch. It accesses no private wrapper
+  state. There is no SWA/extra pool (`max_extra_topk=0`).
+
+Synthetic inputs use unique causal indices drawn by random-score top-k, following
+FlashMLA's test approach; this does not implement the learned GLM indexer. Both
+phases demonstrate CUDA Graph replay with live index lists, padded cache pages,
+FP8 descales when selected, and sampled FP64 reference checks. Preparation and
+attention are captured together so replay refreshes dependent metadata. This
+example reports correctness and tensor shapes, not benchmark timings.
+
+### Setup for sparse MLA
+
+Use the sparse API from [FlashInfer PR #5434](https://github.com/flashinfer-ai/flashinfer/pull/5434).
+This is a separate qualified feature checkout from the QToken example above.
+The commands below use CUDA 13 and the validated CUTLASS DSL version:
+
+```bash
+git clone --recursive --branch feat/prims-ts-sparse-mla \
+  https://github.com/PerkzZheng/flashinfer.git flashinfer-sparse-mla
+git -C flashinfer-sparse-mla checkout 8ac751ee6a09d8a349a136192dc1ca48d848ac6d
+python -m pip install 'setuptools>=77' 'nvidia-cutlass-dsl[cu13]==4.7.0' triton
+python -m pip install --no-build-isolation -e ./flashinfer-sparse-mla
+
+# From this examples repository:
+python glm5_sparse_mla.py
+python glm5_sparse_mla.py --dtype fp8
+```
+
+A small invocation also covers short causal prefixes and compacted holes:
+
+```bash
+python glm5_sparse_mla.py --prefill-queries 128 --context 128 --topk 64 \
+  --heads 16 --decode-batch 2
+```
+
+SM100/SM103 are supported by the API. Runtime validation for this example is
+recorded on GB300/SM103; SM100 has not been exercised here.
 
 ## Development
 
