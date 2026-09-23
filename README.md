@@ -82,8 +82,13 @@ has no separate dense-prefill implementation or phase-specific attention code.
 
 | Phase | Query shape | Context | Selected tokens |
 | --- | --- | --- | --- |
-| Cached-prefix prefill | `[1, 8192, 64, 512]` | 32768 | 512 per query |
-| MTP decode | `[4, 4, 64, 512]` | 32768 | 512 per query |
+| Cached-prefix prefill | `[1, 8192, 64, 512]` | 32768 | 2048 per query |
+| MTP decode | `[4, 4, 64, 512]` | 32768 | 2048 per query |
+
+The default `--topk 2048` matches `index_topk` in the
+[GLM-5.3-Flash config](https://huggingface.co/zai-org/GLM-5.3-Flash/blob/main/config.json).
+Its `index_kpool=4` means 512 pooled selections expand to 2048 token selections.
+This synthetic example generates the token indices directly.
 
 For a serving backend:
 
@@ -94,6 +99,8 @@ For a serving backend:
   before absorption, hence `256**-0.5`, even though Q and latent KV have width 512.
 - Supply expanded logical **token** indices from the GLM pooled indexer, including
   its causal-tail selection. Pooled index IDs cannot be passed as token IDs.
+  Plan `max_topk` for the full list: the incomplete pool tail can add up to three
+  tokens beyond 2048; include any producer-side padding in the list capacity.
   Indexer pooling does not compress this attention KV cache.
 - Map those tokens through the request's block table. The small Triton preparer
   compacts holes, accounts for physical page strides, and emits every prepared

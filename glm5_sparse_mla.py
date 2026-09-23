@@ -234,7 +234,8 @@ def run_example(label, *, batch, queries, heads, context, topk, dtype, device):
     )
     print(
         f"{label}: Q={tuple(query.shape)}, O={tuple(out.shape)}, "
-        f"{str(dtype).removeprefix('torch.')}, sampled reference + graph replay passed"
+        f"topk={topk}, {str(dtype).removeprefix('torch.')}, "
+        "sampled reference + graph replay passed"
     )
     # O is still in latent space. The backend applies its learned value/output
     # projection after this call; no separate dense-prefill attention is needed.
@@ -248,7 +249,12 @@ def main():
     parser.add_argument("--decode-batch", type=int, default=4)
     parser.add_argument("--decode-queries", type=int, default=4)
     parser.add_argument("--context", type=int, default=32768)
-    parser.add_argument("--topk", type=int, default=512)
+    parser.add_argument(
+        "--topk",
+        type=int,
+        default=2048,
+        help="Selected token count after pool expansion",
+    )
     parser.add_argument(
         "--heads", type=int, default=64, help="Local query heads after TP"
     )
