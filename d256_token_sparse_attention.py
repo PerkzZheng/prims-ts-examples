@@ -131,7 +131,9 @@ def run_example(*, batch_size: int, seq_len_q: int, context: int, topk: int) -> 
     wrapper = QTokenKvBlockSparsePagedTSWrapper()
     wrapper.plan(
         batch_size=num_query_routes,
-        # The wrapper parameter means G, not the application's seq_len_q.
+        # Upstream main / PR #5351 require this argument (no default).
+        # It denotes sparse group size G=1. The application's seq_len_q is
+        # 16384 for prefill or 4 for MTP; all B * seq_len_q routes run together.
         seq_len_q=query_group_size,
         num_qo_heads=heads_q,
         num_kv_heads=heads_kv,
