@@ -116,8 +116,8 @@ def run_example(*, batch_size: int, seq_len_q: int, context: int, topk: int) -> 
     q_groups = q.unsqueeze(2)
     output_groups = output.unsqueeze(2)
     num_query_routes = batch_size * seq_len_q
-    # One KV partition matches the measured configurations. The same flag must
-    # be used for workspace sizing and planning.
+    # Keep split_kv=True (the API default) for both sizing and planning.
+    # The planner chooses whether splitting is useful for this workload.
     workspace_bytes = get_q_token_kv_block_sparse_workspace_size(
         q_groups,
         kv,
@@ -125,7 +125,6 @@ def run_example(*, batch_size: int, seq_len_q: int, context: int, topk: int) -> 
         block_topk=topk,
         max_seq_len_kv=context,
         kv_block_size=1,
-        split_kv=False,
     )
     workspace = torch.empty(workspace_bytes, dtype=torch.uint8, device=device)
     wrapper = QTokenKvBlockSparsePagedTSWrapper()
@@ -144,7 +143,6 @@ def run_example(*, batch_size: int, seq_len_q: int, context: int, topk: int) -> 
         max_seq_len_kv=context,
         device=device,
         workspace_buffer=workspace,
-        split_kv=False,
         q_data_type=torch.bfloat16,
         kv_data_type=torch.bfloat16,
         o_data_type=torch.bfloat16,

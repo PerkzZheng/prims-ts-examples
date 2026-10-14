@@ -193,6 +193,10 @@ python d256_token_sparse_attention.py --context 257 --prefill-queries 257 \
   --decode-batch 2
 ```
 
+Workspace sizing and planning both retain the API default `split_kv=True`.
+This permits automatic split-KV selection; the planner can still choose one
+partition when the query routes already provide enough parallelism.
+
 Planning, allocation, and JIT warmup happen before capture. Both phases capture
 `wrapper.run`, replay into a preallocated output, then update Q and indices in
 place and replay the same graph. Sampled outputs are checked against FP32
