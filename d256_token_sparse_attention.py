@@ -16,8 +16,9 @@
 
 Q has 256 heads; the contiguous HND cache has two independent KV heads.
 Each query selects logical token IDs, shared across the two KV heads.
-G=1 is the sparse route size, not the number of queries in the request:
-both prefill and Q=4 decode use Q shaped [B, Q, 1, Hq, D].
+The application tensors use [B, seq_len_q, Hq, D]: seq_len_q=16384 for
+prefill and seq_len_q=4 for MTP decode. A zero-copy view adds the wrapper's
+G=1 sparse-group axis. All query rows are submitted in one wrapper call.
 
 Plan and warm up outside capture. Keep all captured storage alive, and update
 its contents in place before replay. One wrapper/workspace serves one ordered
@@ -62,8 +63,8 @@ def make_token_indices(
 
 def check_output(q, kv, table, indices, requests, positions, output) -> None:
     """Check representative queries against FP32 attention over selected tokens."""
-    flat_q = q.flatten(0, 2)
-    flat_out = output.flatten(0, 2)
+    flat_q = q.flatten(0, 1)
+    flat_out = output.flatten(0, 1)
     rows = sorted({0, 1, 63, 127, flat_q.shape[0] // 2, flat_q.shape[0] - 1})
     for row in (r for r in rows if r < flat_q.shape[0]):
         ids = indices[row].long()
@@ -80,17 +81,17 @@ def check_output(q, kv, table, indices, requests, positions, output) -> None:
 
 
 @torch.inference_mode()
-def run_example(*, batch: int, queries: int, context: int, topk: int) -> None:
+def run_example(*, batch_size: int, seq_len_q: int, context: int, topk: int) -> None:
     device = torch.device("cuda")
     page_size, heads_q, heads_kv, head_dim = 64, 256, 2, 256
     pages_per_request = (context + page_size - 1) // page_size
     # Each request owns separate physical pages. Shuffle the mapping to show
     # that sparse IDs are logical token positions, not physical cache offsets.
     table = torch.randperm(
-        batch * pages_per_request, device=device, dtype=torch.int32
-    ).view(batch, pages_per_request)
+        batch_size * pages_per_request, device=device, dtype=torch.int32
+    ).view(batch_size, pages_per_request)
     kv = torch.randn(
-        batch * pages_per_request,
+        batch_size * pages_per_request,
         heads_kv,
         page_size,
         head_dim,
@@ -98,20 +99,27 @@ def run_example(*, batch: int, queries: int, context: int, topk: int) -> None:
         dtype=torch.bfloat16,
     )
     q = torch.randn(
-        batch, queries, 1, heads_q, head_dim, device=device, dtype=torch.bfloat16
+        batch_size, seq_len_q, heads_q, head_dim, device=device, dtype=torch.bfloat16
     )
-    requests = torch.arange(batch, device=device, dtype=torch.int32).repeat_interleave(
-        queries
-    )
+    requests = torch.arange(
+        batch_size, device=device, dtype=torch.int32
+    ).repeat_interleave(seq_len_q)
     positions = torch.arange(
-        context - queries, context, device=device, dtype=torch.int32
-    ).repeat(batch)
+        context - seq_len_q, context, device=device, dtype=torch.int32
+    ).repeat(batch_size)
     indices = make_token_indices(positions, topk, context)
     output = torch.empty_like(q)
+    # This wrapper takes [B, num_groups, G, Hq, D]. Each query has its own
+    # token list, so the token-sparse kernel uses G=1 and num_groups=seq_len_q.
+    # unsqueeze is a view: it neither copies nor drops any query/output rows.
+    query_group_size = 1
+    q_groups = q.unsqueeze(2)
+    output_groups = output.unsqueeze(2)
+    num_query_routes = batch_size * seq_len_q
     # One KV partition matches the measured configurations. The same flag must
     # be used for workspace sizing and planning.
     workspace_bytes = get_q_token_kv_block_sparse_workspace_size(
-        q,
+        q_groups,
         kv,
         table,
         block_topk=topk,
@@ -122,8 +130,9 @@ def run_example(*, batch: int, queries: int, context: int, topk: int) -> None:
     workspace = torch.empty(workspace_bytes, dtype=torch.uint8, device=device)
     wrapper = QTokenKvBlockSparsePagedTSWrapper()
     wrapper.plan(
-        batch_size=batch * queries,  # Number of G=1 query routes.
-        seq_len_q=1,
+        batch_size=num_query_routes,
+        # The wrapper parameter means G, not the application's seq_len_q.
+        seq_len_q=query_group_size,
         num_qo_heads=heads_q,
         num_kv_heads=heads_kv,
         head_dim=head_dim,
@@ -140,16 +149,17 @@ def run_example(*, batch: int, queries: int, context: int, topk: int) -> None:
     )
 
     def run():
-        return wrapper.run(
-            q,
+        wrapper.run(
+            q_groups,
             (kv, kv),  # Identical storage enables the shared-KV load schedule.
             table,
             indices,
             requests,
             positions,
             sm_scale=head_dim**-0.5,
-            out=output,
+            out=output_groups,
         )
+        return output  # Application layout: [B, seq_len_q, Hq, D].
 
     warmup_stream = torch.cuda.Stream()
     warmup_stream.wait_stream(torch.cuda.current_stream())
@@ -176,7 +186,7 @@ def run_example(*, batch: int, queries: int, context: int, topk: int) -> None:
         graph.replay()
     check_output(q, kv, table, indices, requests, positions, output)
     print(
-        f"PASS B={batch} Q={queries} KV={context} topk={topk}: "
+        f"PASS B={batch_size} seq_len_q={seq_len_q} KV={context} topk={topk}: "
         "BF16 Hq=256 Hkv=2 D=256; eager, graph replay, and updated indices"
     )
 
@@ -211,12 +221,15 @@ def main() -> None:
     torch.backends.cuda.matmul.allow_tf32 = False
     if args.phase in ("prefill", "both"):
         run_example(
-            batch=1, queries=args.prefill_queries, context=args.context, topk=args.topk
+            batch_size=1,
+            seq_len_q=args.prefill_queries,
+            context=args.context,
+            topk=args.topk,
         )
     if args.phase in ("decode", "both"):
         run_example(
-            batch=args.decode_batch,
-            queries=args.decode_queries,
+            batch_size=args.decode_batch,
+            seq_len_q=args.decode_queries,
             context=args.context,
             topk=args.topk,
         )

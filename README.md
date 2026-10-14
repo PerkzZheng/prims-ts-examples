@@ -154,8 +154,18 @@ K and V share storage within each KV head; the two KV heads hold independent dat
 | Full causal prefill | 1 | 16384 | 16384 | 512 or 2048 |
 | Decode | 512 | 4 | 16384 | 512 or 2048 |
 
-The query view is `[B, Q, 1, 256, 256]`: G=1 keeps each query's sparse list
-independent, including during multi-query decode. Token IDs are zero-based
+The application Q/output shape is `[B, seq_len_q, 256, 256]`, with
+`seq_len_q=16384` for full prefill and `seq_len_q=4` for MTP decode. The example
+adds a zero-copy group axis to call the wrapper with `[B, seq_len_q, 1, 256, 256]`.
+All query rows run in one wrapper call; there is no per-query Python launch loop.
+
+The wrapper's `plan(seq_len_q=...)` parameter denotes the **sparse group size G**.
+It is set to `query_group_size=1`, while `plan(batch_size=...)` receives the total
+number of routes `B * seq_len_q`. This does not restrict the request to one query.
+The current token-sparse kernel processes each query independently; fusing
+multiple queries into one sparse group (G>1) is not implemented.
+
+Token IDs are zero-based
 logical positions mapped through a shuffled physical page table. Each row
 contains `min(topk, query_position + 1)` distinct causal IDs followed by `-1`
 padding. Physical HND cache pages contain 64 tokens. Supply a contiguous cache;
@@ -175,6 +185,9 @@ python -m pip install --no-build-isolation -e ./flashinfer-token-sparse
 # From this examples repository:
 python d256_token_sparse_attention.py
 python d256_token_sparse_attention.py --topk 2048
+# Explicit full prefill and Q=4 MTP decode:
+python d256_token_sparse_attention.py --phase prefill --prefill-queries 16384
+python d256_token_sparse_attention.py --phase decode --decode-batch 512 --decode-queries 4
 # Smaller run with short causal prefixes and a partial physical page:
 python d256_token_sparse_attention.py --context 257 --prefill-queries 257 \
   --decode-batch 2
