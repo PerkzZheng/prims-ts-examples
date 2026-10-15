@@ -210,6 +210,10 @@ Validated on GB300/SM103 with the PyTorch 26.08 development image and CUTLASS
 DSL 4.8.0. SM100/SM107 have not been exercised here. The full decode example
 allocates roughly 8 GiB for the BF16 KV cache.
 
+To reproduce the PrimTS D256 versus FlashMLA D512 performance table, use the
+[benchmark runner and setup guide](benchmarks/token_sparse_attention/README.md).
+It saves shared top-k inputs and emits Markdown, CSV, and JSON comparisons.
+
 ## Development
 
 ```bash
