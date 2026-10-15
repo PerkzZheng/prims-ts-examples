@@ -142,6 +142,78 @@ python glm5_sparse_mla.py --prefill-queries 128 --context 128 --topk 64 \
 SM100/SM103 are supported by the API. Runtime validation for this example is
 recorded on GB300/SM103; SM100 has not been exercised here.
 
+## D256 per-token sparse attention
+
+[d256_token_sparse_attention.py](d256_token_sparse_attention.py) calls the public
+`QTokenKvBlockSparsePagedTSWrapper` with `kv_block_size=1`, BF16 Q/KV/output,
+Hq=256, Hkv=2, and D=256. Both MMAs use BF16 operands and FP32 accumulation.
+K and V share storage within each KV head; the two KV heads hold independent data.
+
+| Phase | Batch | Queries per request | Original KV length | Top-k |
+| --- | --- | --- | --- | --- |
+| Full causal prefill | 1 | 16384 | 16384 | 512 or 2048 |
+| Decode | 512 | 4 | 16384 | 512 or 2048 |
+
+The application Q/output shape is `[B, seq_len_q, 256, 256]`, with
+`seq_len_q=16384` for full prefill and `seq_len_q=4` for MTP decode. The example
+adds a zero-copy group axis to call the wrapper with `[B, seq_len_q, 1, 256, 256]`.
+All query rows run in one wrapper call; there is no per-query Python launch loop.
+
+The wrapper's `plan(seq_len_q=...)` parameter denotes the **sparse group size G**.
+It is set to `query_group_size=1`, while `plan(batch_size=...)` receives the total
+number of routes `B * seq_len_q`. This does not restrict the request to one query.
+The current token-sparse kernel processes each query independently; fusing
+multiple queries into one sparse group (G>1) is not implemented.
+
+Token IDs are zero-based
+logical positions mapped through a shuffled physical page table. Each row
+contains `min(topk, query_position + 1)` distinct causal IDs followed by `-1`
+padding. Physical HND cache pages contain 64 tokens. Supply a contiguous cache;
+pass the same tensor twice as `(kv, kv)` to enable shared KV staging.
+
+Install this example's feature branch, based on
+[FlashInfer PR #5351](https://github.com/flashinfer-ai/flashinfer/pull/5351),
+in a CUDA 13 PyTorch environment:
+
+```bash
+git clone --recursive --branch prims-ts-d256-token-sparse \
+  https://github.com/PerkzZheng/flashinfer.git flashinfer-token-sparse
+git -C flashinfer-token-sparse checkout d9c5811cf5530aa3969761847c0ee1399cff7f18
+python -m pip install 'setuptools>=77' 'nvidia-cutlass-dsl[cu13]==4.8.0'
+python -m pip install --no-build-isolation -e ./flashinfer-token-sparse
+
+# From this examples repository:
+python d256_token_sparse_attention.py
+python d256_token_sparse_attention.py --topk 2048
+# Explicit full prefill and Q=4 MTP decode:
+python d256_token_sparse_attention.py --phase prefill --prefill-queries 16384
+python d256_token_sparse_attention.py --phase decode --decode-batch 512 --decode-queries 4
+# Smaller run with short causal prefixes and a partial physical page:
+python d256_token_sparse_attention.py --context 257 --prefill-queries 257 \
+  --decode-batch 2
+```
+
+Workspace sizing and planning both retain the API default `split_kv=True`.
+This permits automatic split-KV selection; the planner can still choose one
+partition when the query routes already provide enough parallelism.
+
+Planning, allocation, and JIT warmup happen before capture. Both phases capture
+`wrapper.run`, replay into a preallocated output, then update Q and indices in
+place and replay the same graph. Sampled outputs are checked against FP32
+PyTorch attention after eager execution and both replay passes. Keep captured
+addresses, shapes, dtypes, and planned capacities fixed; update contents on the
+same ordered stream. Concurrent executions need separate wrappers/workspaces.
+Top-k generation and reference checks are outside the captured attention graph.
+This is a correctness/usage example, not a timing benchmark.
+
+Validated on GB300/SM103 with the PyTorch 26.08 development image and CUTLASS
+DSL 4.8.0. SM100/SM107 have not been exercised here. The full decode example
+allocates roughly 8 GiB for the BF16 KV cache.
+
+To reproduce the PrimTS D256 versus FlashMLA D512 performance table, use the
+[benchmark runner and setup guide](benchmarks/token_sparse_attention/README.md).
+It saves shared top-k inputs and emits Markdown, CSV, and JSON comparisons.
+
 ## Development
 
 ```bash
