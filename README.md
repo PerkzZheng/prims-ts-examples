@@ -103,8 +103,8 @@ For a serving backend:
   tokens beyond 2048; include any producer-side padding in the list capacity.
   Indexer pooling does not compress this attention KV cache.
 - Map those tokens through the request's block table. The small Triton preparer
-  compacts holes, accounts for physical page strides, and emits every prepared
-  metadata field needed by automatic dispatch. It accesses no private wrapper
+  compacts holes and accounts for physical page strides, producing only
+  storage-row indices and live lengths for every automatic schedule. It accesses no private wrapper
   state. There is no SWA/extra pool (`max_extra_topk=0`).
 
 Synthetic inputs use unique causal indices drawn by random-score top-k, following
@@ -123,7 +123,7 @@ The commands below use CUDA 13 and the validated CUTLASS DSL version:
 ```bash
 git clone --recursive --branch feat/prims-ts-sparse-mla \
   https://github.com/PerkzZheng/flashinfer.git flashinfer-sparse-mla
-git -C flashinfer-sparse-mla checkout 8ac751ee6a09d8a349a136192dc1ca48d848ac6d
+git -C flashinfer-sparse-mla checkout 116e4f884aaccf19ed89c7d9a5504224f6d7be59
 python -m pip install 'setuptools>=77' 'nvidia-cutlass-dsl[cu13]==4.7.0' triton
 python -m pip install --no-build-isolation -e ./flashinfer-sparse-mla
 

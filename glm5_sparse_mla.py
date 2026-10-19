@@ -30,16 +30,8 @@ def _prepare_indices(
     block_table,
     indices,
     lengths,
-    routes,
-    execution_lengths,
-    scale_params,
-    q_scale,
-    kv_scale,
-    softmax_scale,
     QUERIES: tl.constexpr,
-    HEADS: tl.constexpr,
     TOPK: tl.constexpr,
-    CAPACITY: tl.constexpr,
     TABLE_STRIDE: tl.constexpr,
     PAGE: tl.constexpr,
     PAGE_STRIDE_ROWS: tl.constexpr,
@@ -60,20 +52,7 @@ def _prepare_indices(
     count = tl.sum(valid.to(tl.int32))
     tl.store(indices + row * TOPK + destination, storage_row, valid)
     tl.store(indices + row * TOPK + col, -1, (col >= count) & (col < TOPK))
-    tl.store(routes + row * CAPACITY + destination, storage_row, valid)
-    tl.store(
-        routes + row * CAPACITY + col,
-        0x7FFFFFFF,
-        (col >= count) & (col < CAPACITY),
-    )
     tl.store(lengths + row, count)
-    tl.store(execution_lengths + row, tl.maximum(tl.cdiv(count, 128) * 128, 1))
-    tl.store(scale_params + 2 + HEADS + row, count.to(tl.float32))
-    if row == 0:
-        ks = tl.load(kv_scale)
-        tl.store(scale_params, softmax_scale * tl.load(q_scale) * ks)
-        tl.store(scale_params + 1, ks)
-        tl.store(scale_params + 2 + col, -float("inf"), col < HEADS)
 
 
 def _make_inputs(batch, queries, heads, context, topk, dtype, device):
@@ -163,43 +142,28 @@ def run_example(label, *, batch, queries, heads, context, topk, dtype, device):
         assume_valid_prefix=True,
     )
     rows = batch * queries
-    capacity = max(256, triton.cdiv(topk, 128) * 128)
     counts = torch.empty(rows, device=device, dtype=torch.int32)
     metadata = SparseMLAPreparedMetadata(
         indices=torch.empty(rows, topk, device=device, dtype=torch.int32),
         lengths=counts,
-        routes=torch.empty(1, rows, capacity, device=device, dtype=torch.int32),
-        execution_lengths=torch.empty(1, rows, device=device, dtype=torch.int32),
-        valid_counts=counts.unsqueeze(0),
-        scale_params=torch.empty(
-            1, 2 + heads + rows, device=device, dtype=torch.float32
-        ),
     )
     out = torch.empty_like(query, dtype=torch.bfloat16)
     lse = torch.empty(query.shape[:-1], device=device, dtype=torch.float32)
 
     def prepare():
-        # Supplying both direct lists and packed fields supports every
-        # automatic schedule; no private wrapper state is used.
+        # Every schedule consumes the same separate index/length inputs.
+        # Source alignment and invalid tail coordinates are handled internally.
         _prepare_indices[(rows,)](
             logical,
             table,
             metadata.indices,
             metadata.lengths,
-            metadata.routes,
-            metadata.execution_lengths,
-            metadata.scale_params,
-            q_scale,
-            kv_scale,
-            softmax_scale,
             queries,
-            heads,
             topk,
-            capacity,
             table.stride(0),
             cache.shape[1],
             cache.stride(0) // 512,
-            triton.next_power_of_2(capacity),
+            triton.next_power_of_2(topk),
         )
 
     def attend(validate=False):
