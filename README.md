@@ -95,16 +95,20 @@ For a serving backend:
 - Supply **absorbed** Q with latent dimension 512 and the native BF16/E4M3 latent
   KV cache. Output is BF16 in latent space; apply the learned value/output
   projection afterward. `--heads` is the local head count after tensor parallelism.
-- Pass the checkpoint's softmax scale. This NoPE example uses QK dimension 256
-  before absorption, hence `256**-0.5`, even though Q and latent KV have width 512.
+- Combine scales upstream: `softmax_scale = attention_scale * q_descale *
+  kv_descale` and `output_scale = kv_descale` (times any desired output gain).
+  This example performs the combination in its existing Triton preparer, so
+  graph replay consumes live descales without an extra preparation launch.
+  Its checkpoint attention scale is `256**-0.5`, using the original QK
+  dimension before absorption, even though native Q/KV rows have width 512.
 - Supply expanded logical **token** indices from the GLM pooled indexer, including
   its causal-tail selection. Pooled index IDs cannot be passed as token IDs.
   Plan `max_topk` for the full list: the incomplete pool tail can add up to three
   tokens beyond 2048; include any producer-side padding in the list capacity.
   Indexer pooling does not compress this attention KV cache.
 - Map those tokens through the request's block table. The small Triton preparer
-  compacts holes, accounts for physical page strides, and emits every prepared
-  metadata field needed by automatic dispatch. It accesses no private wrapper
+  compacts holes and accounts for physical page strides, producing only
+  storage-row indices and live lengths for every automatic schedule. It accesses no private wrapper
   state. There is no SWA/extra pool (`max_extra_topk=0`).
 
 Synthetic inputs use unique causal indices drawn by random-score top-k, following
@@ -123,7 +127,7 @@ The commands below use CUDA 13 and the validated CUTLASS DSL version:
 ```bash
 git clone --recursive --branch feat/prims-ts-sparse-mla \
   https://github.com/PerkzZheng/flashinfer.git flashinfer-sparse-mla
-git -C flashinfer-sparse-mla checkout 8ac751ee6a09d8a349a136192dc1ca48d848ac6d
+git -C flashinfer-sparse-mla checkout 6fdd402bf2d2d7ea18264e86bb3a8815c56c3b92
 python -m pip install 'setuptools>=77' 'nvidia-cutlass-dsl[cu13]==4.7.0' triton
 python -m pip install --no-build-isolation -e ./flashinfer-sparse-mla
 
