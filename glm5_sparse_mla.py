@@ -20,7 +20,6 @@ import triton
 import triton.language as tl
 from flashinfer.attention.prims_ts import (
     BatchSparseMLADecodePagedTSWrapper,
-    SparseMLAPreparedMetadata,
 )
 
 
@@ -30,6 +29,11 @@ def _prepare_indices(
     block_table,
     indices,
     lengths,
+    q_descale,
+    kv_descale,
+    softmax_scale,
+    output_scale,
+    ATTENTION_SCALE: tl.constexpr,
     QUERIES: tl.constexpr,
     TOPK: tl.constexpr,
     TABLE_STRIDE: tl.constexpr,
@@ -38,6 +42,11 @@ def _prepare_indices(
     BLOCK: tl.constexpr,
 ):
     row = tl.program_id(0)
+    if row == 0:
+        # Combine producer descales in existing upstream work, including replay.
+        sq, skv = tl.load(q_descale), tl.load(kv_descale)
+        tl.store(softmax_scale, (ATTENTION_SCALE * sq) * skv)
+        tl.store(output_scale, skv)
     col = tl.arange(0, BLOCK)
     token = tl.load(logical + row * TOPK + col, col < TOPK, -1)
     valid = (col < TOPK) & (token >= 0)
@@ -143,10 +152,9 @@ def run_example(label, *, batch, queries, heads, context, topk, dtype, device):
     )
     rows = batch * queries
     counts = torch.empty(rows, device=device, dtype=torch.int32)
-    metadata = SparseMLAPreparedMetadata(
-        indices=torch.empty(rows, topk, device=device, dtype=torch.int32),
-        lengths=counts,
-    )
+    indices = torch.empty(rows, topk, device=device, dtype=torch.int32)
+    effective_softmax_scale = torch.empty((), device=device, dtype=torch.float32)
+    effective_output_scale = torch.empty_like(effective_softmax_scale)
     out = torch.empty_like(query, dtype=torch.bfloat16)
     lse = torch.empty(query.shape[:-1], device=device, dtype=torch.float32)
 
@@ -156,8 +164,13 @@ def run_example(label, *, batch, queries, heads, context, topk, dtype, device):
         _prepare_indices[(rows,)](
             logical,
             table,
-            metadata.indices,
-            metadata.lengths,
+            indices,
+            counts,
+            q_scale,
+            kv_scale,
+            effective_softmax_scale,
+            effective_output_scale,
+            softmax_scale,
             queries,
             topk,
             table.stride(0),
@@ -170,10 +183,10 @@ def run_example(label, *, batch, queries, heads, context, topk, dtype, device):
         return wrapper.run(
             query,
             cache,
-            metadata,
-            q_scale=q_scale,
-            kv_scale=kv_scale,
-            softmax_scale=softmax_scale,
+            indices,
+            counts,
+            softmax_scale=effective_softmax_scale,
+            output_scale=effective_output_scale,
             out=out,
             lse=lse,
             validate=validate,
@@ -188,6 +201,9 @@ def run_example(label, *, batch, queries, heads, context, topk, dtype, device):
     # Replays consume live input lists, including holes that preparation
     # compacts into the valid prefixes promised to attention.
     logical.copy_(logical.flip(-1))
+    if dtype == torch.float8_e4m3fn:
+        q_scale.mul_(1.25)
+        kv_scale.mul_(0.75)
     out.fill_(torch.nan)
     lse.fill_(torch.nan)
     graph.replay()
