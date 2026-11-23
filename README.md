@@ -184,7 +184,7 @@ Setup: an SM100/SM103 GPU and FlashInfer with PrimTS D512 FP8-K/V decode, from
 ```bash
 git clone --recursive --branch perf/prims-ts-d512-gqa-decode \
   https://github.com/PerkzZheng/flashinfer.git
-git -C flashinfer checkout 8894e418a0c966d008f5276060a26aabfcc515ae
+git -C flashinfer checkout 5c29ee46134a4c95ad4e361e2592890a8006a246
 python -m pip install --no-build-isolation -e ./flashinfer
 
 python nvfp4_shared_prefix_convert_once.py --batch 32   # also --batch 16 / 8
