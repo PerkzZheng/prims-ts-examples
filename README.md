@@ -142,6 +142,60 @@ python glm5_sparse_mla.py --prefill-queries 128 --context 128 --topk 64 \
 SM100/SM103 are supported by the API. Runtime validation for this example is
 recorded on GB300/SM103; SM100 has not been exercised here.
 
+## NVFP4 shared-prefix decode (convert-once split)
+
+[nvfp4_shared_prefix_convert_once.py](nvfp4_shared_prefix_convert_once.py)
+decodes requests whose first KV pages are shared (prefix caching) from an NVFP4
+cache. PrimTS converts NVFP4 K/V to FP8 inside the attention kernel, so a plain
+decode call converts the shared pages once per request. The example converts
+them once per step and splits the call:
+
+| Step | What runs |
+| --- | --- |
+| 1. Convert | A small CUDA kernel in the example writes `E4M3(e2m1 * block_scale)` copies of the shared pages: the exact FP8 values the NVFP4 kernel computes with |
+| 2. Prefix pass | `BatchDecodePagedTSWrapper` with FP8 K/V over the copy, dense mask, base-2 LSE |
+| 3. Suffix pass | `BatchDecodePagedTSWrapper` with NVFP4 K/V over each request's private pages, causal mask, base-2 LSE, on a side stream |
+| 4. Merge | `flashinfer.merge_state_in_place` |
+
+Attention and merging are FlashInfer public APIs; FlashInfer selects the
+kernels (grouped Keeps for both passes at this shape). The example checks the
+conversion bit-exactly, compares both paths against an FP32 reference, and times
+each as a CUDA graph with a cold L2.
+
+Global-attention GQA layer: Hq/Hkv 32/4, D512, page 64, q_len 8,
+a 30720-token shared prefix plus 2048 private tokens per request, FP8 Q, BF16
+output. B300, CUDA-event time per graph replay:
+
+| Batch | Single NVFP4 call | Convert-once split | Speedup |
+| --- | --- | --- | --- |
+| 32 | 436.2 us | 323.6 us | 1.35x |
+| 16 | 229.4 us | 210.9 us | 1.09x |
+| 8 | 124.9 us | 149.5 us | 0.84x |
+
+The conversion is a fixed cost per step (about 35 us here) while the saving
+grows with the number of requests sharing the prefix, so use the split for
+roughly 16 or more sharers of a long prefix and the single call otherwise.
+Keeping the converted prefix across steps would remove the conversion, at the
+cost of an FP8 copy of the shared pages.
+
+Setup: an SM100/SM103 GPU and FlashInfer with PrimTS D512 FP8-K/V decode, from
+[flashinfer-ai/flashinfer#9771](https://github.com/flashinfer-ai/flashinfer/pull/9771):
+
+```bash
+git clone --recursive --branch perf/prims-ts-d512-gqa-decode \
+  https://github.com/PerkzZheng/flashinfer.git
+git -C flashinfer checkout 5c29ee46134a4c95ad4e361e2592890a8006a246
+python -m pip install --no-build-isolation -e ./flashinfer
+
+python nvfp4_shared_prefix_convert_once.py --batch 32   # also --batch 16 / 8
+```
+
+The conversion kernel JIT-compiles through `torch.utils.cpp_extension` on first
+use; set `PRIMS_TS_EXAMPLE_BUILD_DIR` to keep the build. It is instantiated for
+D512 and page size 64 with the PrimTS NVFP4 scale layout (row-major K scales,
+V scales transposed 4x4 within each 4-token group). Validated on B300 (SM103);
+SM100 has not been exercised with this example.
+
 ## Development
 
 ```bash
